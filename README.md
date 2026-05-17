@@ -12,6 +12,12 @@ by a sum of anisotropic Gaussians matching the imaging PSF, fitted
 against the observed image with Levenberg–Marquardt. Deprecates the
 original Fiji / imglib2 plugin.
 
+**End goal**: per-microtubule length profiles over time, separated into
+plus-end and minus-end trajectories. The pipeline here delivers stage 1
+(per-frame, per-MT endpoints from a TIFF stack with segmentation
+labels); the tracker that links those endpoints into trajectories with
+a Hungarian + two-frame velocity cost is the next push.
+
 ---
 
 ## The model
@@ -125,25 +131,175 @@ local minimum.
 
 ---
 
+## End-to-end on a TIFF stack
+
+For real data the pipeline takes a raw TIFF and a label TIFF (one
+integer per microtubule, shared across timepoints if you have a single
+segmentation), and produces a per-microtubule, per-frame CSV of fitted
+endpoints. Both inputs may be 2-D `(H, W)` or 2-D + time `(T, H, W)`.
+
+### As a script
+
+```bash
+python scripts/fit_endpoints.py \
+    --raw     movie_raw.tif \
+    --labels  movie_labels.tif \
+    --sigma   1.6 1.6 \
+    --out     endpoints.csv \
+    --jac-mode hybrid
+```
+
+### As a library call
+
+```python
+from kapoorlabs_mtrack.io import load_pair, save_endpoints_csv
+from kapoorlabs_mtrack.pipeline import fit_stack
+from kapoorlabs_mtrack.pipeline.fit_stack import snapshots_to_csv_rows
+
+raw, labels = load_pair("movie_raw.tif", "movie_labels.tif")
+snapshots = fit_stack(raw.array, labels.array, sigma=(1.6, 1.6),
+                      jac_mode="hybrid")
+
+# snapshots is list[FrameSnapshot] -- one per timepoint, each with
+# a list of fitted microtubules (.mts) and any skipped labels.
+for fs in snapshots:
+    for m in fs.mts:
+        print(fs.frame, m.label, m.mt_in_label, m.start, m.end, m.fit_cost)
+
+save_endpoints_csv("endpoints.csv", snapshots_to_csv_rows(snapshots))
+```
+
+### Per-label workflow
+
+For each `(frame, label)`:
+
+1. The label's bounding box is cropped with `pad = ceil(3 * max(σ))` so
+   the Gaussian tails are inside the crop.
+2. The cropped binary mask is skeletonised (`scikit-image`'s
+   `skeletonize`). The number of skeleton endpoints determines how many
+   microtubules share this region: 2 → single, 4 → two crossing,
+   6 → three, etc. **Odd counts skip the region** with status
+   `skip:odd-endpoints(eps=N)`.
+3. Endpoints are paired into `(start, end)` tuples by **entry-tangent
+   alignment** (see "Endpoint pairing" below).
+4. A seed `a` is built: start/end from the skeleton, `ds = 0.7`,
+   curvature/inflection = 0, amplitude from `(peak − bg) / 5`, bg from
+   the crop median.
+5. Single MT → `fit.fit_endpoints`; two-or-more → `fit.fit_endpoints_joint`
+   with the per-MT 8-vectors packed via `models.multi.pack`.
+6. Output coordinates are translated from crop-local back to full-image
+   `(x, y)`.
+
+### CSV schema (`endpoints.csv`)
+
+| Column | Meaning |
+|---|---|
+| `frame` | timepoint index (0 for a 2-D input) |
+| `label` | source segmentation label id |
+| `mt_in_label` | 0..N-1 index within a joint-fit region (0 for single MTs) |
+| `n_mt_in_label` | N microtubules detected in this label |
+| `start_x`, `start_y` | fitted start coordinate in full-image pixels |
+| `end_x`, `end_y` | fitted end coordinate in full-image pixels |
+| `ds`, `curvature`, `inflection`, `amplitude` | refined model parameters |
+| `background` | shared background for the region (same value across N MTs of one joint fit) |
+| `fit_cost` | final `0.5 * Σ residuals²` from scipy |
+| `status` | `ok` for fitted rows, `skip:<reason>` for regions that were not fitted |
+
+The exact column list is in
+`kapoorlabs_mtrack.io.tif.ENDPOINT_CSV_COLUMNS`. The tracker (next
+push) consumes this schema directly.
+
+---
+
+## Joint fits for crossings / overlapping microtubules
+
+When a single label region contains multiple microtubules (X- or
+T-crossing, or partial overlap), we fit them jointly. The joint model
+(`models.multi`) packs `N` microtubules into one parameter vector and
+shares **one background scalar** across the crop:
+
+```
+a_concat[0..7]     MT 1: start_x, start_y, end_x, end_y, ds, curv, infl, amp
+a_concat[8..15]    MT 2: same fields
+...
+a_concat[-1]       shared background
+```
+
+Length = `8N + 1`. Use `models.multi.pack(per_mt_8vecs, bg)` to build
+this vector, and `fit.fit_endpoints_joint(crop, seed, b, n_mt=N)` to
+fit it. The analytic Jacobian is block-diagonal in the per-MT columns
+plus a column of `1`s for the background, so the speed vs accuracy
+tradeoff (`jac_mode`) carries over identically.
+
+**Accuracy at crossings.** Endpoints inherently lose ~1–2 px precision
+at the pixel where two MTs' Gaussian envelopes overlap most strongly.
+The shipped `test_joint.py` confirms 3 of 4 endpoints sub-pixel and 1
+endpoint at ~1 px on a clean two-MT crossing; on noisy crop boundaries
+this can grow to ~3–4 px. The downstream tracker is designed to
+absorb this — the length profile is robust even with a few-pixel
+endpoint jitter.
+
+### Endpoint pairing at junctions
+
+With `N ≥ 2` microtubules in one label, the skeleton has `2N`
+endpoints around the region perimeter — but no labels telling us which
+endpoint belongs to which MT. We pair them by **entry-tangent
+alignment**:
+
+1. From each endpoint, walk `K=5` skeleton pixels inward along the arm.
+   Stop early if a junction (degree ≥ 3) is hit.
+2. The unit vector from `endpoint` → `end_of_walk` is the entry
+   tangent, capturing the local arm direction *before* it gets lost in
+   the multi-pixel junction zone.
+3. Pair cost: `1 + dot(t_i, t_j)`. Antiparallel tangents (the same MT
+   continues from `i` through the junction to `j`) → cost 0. Parallel
+   tangents (different MTs pointing the same way) → cost 2.
+4. Enumerate all perfect matchings of endpoints into pairs and pick the
+   one with minimum total cost. For `N=2` there are 3 matchings; for
+   `N=3`, 15. Fine for hand-segmented data.
+
+We tried a path-integrated angle-change cost first; it failed because
+`skeletonize` of a dilated mask produces a thick, multi-pixel junction
+zone whose accumulated wiggle saturates the angle integral. The
+entry-tangent approach sidesteps the junction entirely. See
+`pipeline/skeleton.py` for the rationale.
+
+---
+
 ## Package layout
 
 ```
-src/kapoorlabs_mtrack/
-├── models/                       # forward model + analytic Jacobian
-│   ├── __init__.py
-│   └── spline_third_order.py     # val, jac, walk_curve
-├── verify/                       # analytic-vs-numeric gradient checks
-│   ├── __init__.py
-│   └── gradient_check.py         # numeric_jacobian, check_jacobian
-├── simulate/                     # synthetic image generation
-│   ├── __init__.py
-│   └── synthetic.py              # render_curve_image, add_shot_noise
-├── fit/                          # scipy LM wrapper
-│   ├── __init__.py
-│   └── lm.py                     # fit_endpoints, FitResult
-└── _tests/
-    ├── test_gradient.py          # analytic vs numeric per-parameter table
-    └── test_pipeline.py          # simulate → fit → assert endpoints
+KapoorLabs-MTrack/
+├── src/kapoorlabs_mtrack/
+│   ├── models/                       # forward model + analytic Jacobian
+│   │   ├── __init__.py
+│   │   ├── spline_third_order.py     # single-MT: val, jac, walk_curve
+│   │   └── multi.py                  # joint N-MT model (shared bg)
+│   ├── verify/                       # analytic-vs-numeric gradient checks
+│   │   ├── __init__.py
+│   │   └── gradient_check.py         # numeric_jacobian, check_jacobian
+│   ├── simulate/                     # synthetic image generation
+│   │   ├── __init__.py
+│   │   └── synthetic.py              # render_curve_image, add_shot_noise
+│   ├── fit/                          # scipy LM wrappers
+│   │   ├── __init__.py
+│   │   ├── lm.py                     # fit_endpoints (single MT)
+│   │   └── joint.py                  # fit_endpoints_joint (N MTs in crop)
+│   ├── io/                           # TIFF I/O for raw + label pairs
+│   │   ├── __init__.py
+│   │   └── tif.py                    # load_pair, save_endpoints_csv
+│   ├── pipeline/                     # orchestration: stack → snapshots
+│   │   ├── __init__.py
+│   │   ├── skeleton.py               # region_seeds_from_label
+│   │   └── fit_stack.py              # fit_stack, snapshots_to_csv_rows
+│   └── _tests/
+│       ├── test_gradient.py          # analytic vs numeric per-parameter table
+│       ├── test_pipeline.py          # simulate → fit → assert endpoints
+│       ├── test_joint.py             # two crossing MTs jointly fit
+│       └── test_fit_stack.py         # full (T,H,W) pipeline end-to-end
+├── scripts/                          # CLI tools that import the package
+│   └── fit_endpoints.py              # raw + label TIFF → endpoints.csv
+└── notebooks/                        # interactive walk-throughs
 ```
 
 ---
@@ -210,6 +366,25 @@ The fitter wraps `scipy.optimize.least_squares`. Default settings:
 
 The Jacobian is provided analytically (see `jac_mode` above) — scipy
 will not recompute it numerically unless you select `jac_mode="numeric"`.
+
+---
+
+## Roadmap
+
+| Stage | Status | Module |
+|---|---|---|
+| 1. Single-MT forward model + analytic Jacobian | ✅ shipped | `models.spline_third_order` |
+| 2. Gradient verifier (analytic vs numeric) | ✅ shipped | `verify.gradient_check` |
+| 3. Synthetic image generator | ✅ shipped | `simulate.synthetic` |
+| 4. Single-MT LM fitter (scipy) | ✅ shipped | `fit.lm` |
+| 5. Joint N-MT model + fitter (crossings / overlaps) | ✅ shipped | `models.multi`, `fit.joint` |
+| 6. TIFF I/O for raw + label pairs | ✅ shipped | `io.tif` |
+| 7. Skeleton-based per-region seeding + endpoint pairing | ✅ shipped | `pipeline.skeleton` |
+| 8. Stack orchestrator (per-frame, per-label fits → CSV) | ✅ shipped | `pipeline.fit_stack`, `scripts/fit_endpoints.py` |
+| 9. Hungarian tracker (cost: distance + intensity + curvature, 2-frame velocity prediction, gating, plus/minus labelling) | ⏳ next | `track/` |
+| 10. Length-profile output (per-MT plus-end and minus-end length-vs-time) | ⏳ after tracker | |
+| 11. Multi-frame synthetic movie generator (for tracker tests) | ⏳ alongside tracker | `scripts/simulate_movie.py` |
+| 12. Interactive notebooks driving the full chain | ⏳ alongside tracker | `notebooks/` |
 
 ---
 
