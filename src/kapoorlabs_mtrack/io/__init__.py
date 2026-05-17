@@ -6,11 +6,18 @@ per-frame loop in :mod:`pipeline.fit_stack` doesn't need a special
 case.
 """
 
-from .tif import StackInfo, load_pair, load_tif_as_stack, save_endpoints_csv
+from .tif import (
+    StackInfo,
+    load_pair,
+    load_tif_as_stack,
+    save_endpoints_csv,
+    save_length_profiles_csv,
+)
 
 __all__ = [
     "load_pair",
     "load_tif_as_stack",
     "save_endpoints_csv",
+    "save_length_profiles_csv",
     "StackInfo",
 ]

@@ -79,3 +79,41 @@ def save_endpoints_csv(path: str | Path, rows: Iterable[dict]) -> None:
         w.writeheader()
         for r in rows:
             w.writerow({k: r.get(k, "") for k in ENDPOINT_CSV_COLUMNS})
+
+
+# Length-profile CSV: one row per (mt_id, frame), wide format so a
+# downstream notebook can pivot straight into a per-MT line plot.
+LENGTH_PROFILE_COLUMNS = (
+    "mt_id",
+    "frame",
+    "plus_x",
+    "plus_y",
+    "minus_x",
+    "minus_y",
+    "tip_distance",
+    "arc_length",
+    "plus_was_tip",  # "A" or "B" -- which raw tip was labelled plus
+)
+
+
+def save_length_profiles_csv(path: str | Path, profiles) -> None:
+    """Flatten a list of :class:`track.profile.LengthProfile` into CSV rows."""
+    path = Path(path)
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(LENGTH_PROFILE_COLUMNS))
+        w.writeheader()
+        for p in profiles:
+            for i, fr in enumerate(p.frames):
+                w.writerow(
+                    {
+                        "mt_id": int(p.mt_id),
+                        "frame": int(fr),
+                        "plus_x": float(p.plus_xy[i, 0]),
+                        "plus_y": float(p.plus_xy[i, 1]),
+                        "minus_x": float(p.minus_xy[i, 0]),
+                        "minus_y": float(p.minus_xy[i, 1]),
+                        "tip_distance": float(p.tip_distance[i]),
+                        "arc_length": float(p.arc_length[i]),
+                        "plus_was_tip": p.plus_was_tip,
+                    }
+                )
