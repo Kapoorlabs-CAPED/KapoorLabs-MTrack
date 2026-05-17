@@ -13,24 +13,40 @@ against the observed image with Levenberg–Marquardt. Deprecates the
 original Fiji / imglib2 plugin.
 
 **End goal**: per-microtubule length profiles over time, separated into
-plus-end and minus-end trajectories, with per-MT kymographs. The
-pipeline runs in three stages:
+plus-end and minus-end trajectories, with per-MT kymographs and
+dynamic-instability statistics (catastrophe + rescue frequencies,
+growth + shrinkage rates).
+
+Two complementary entry points:
 
 ```
-TIFF stack + label TIFF
-        │
-        │  scripts/fit_endpoints.py     (stage 8)
-        ▼
-endpoints.csv                           per-frame, per-MT model fits
-        │
-        │  scripts/track_endpoints.py   (stages 9-10)
-        ▼
-tracks.csv + length_profiles.csv        plus/minus tip trajectories
-        │
-        │  notebooks/02_*.ipynb         (visualisation)
-        ▼
-length plots + kymographs               per microtubule
+2-D + time raw TIFF + label TIFF             single-MT kymograph TIFF
+            │                                          │
+            │  scripts/fit_endpoints.py                │  ransac.extract_kymograph_points
+            ▼                                          ▼
+       endpoints.csv                              (t, x) point cloud
+            │                                          │
+            │  scripts/track_endpoints.py              │  ransac.Ransac /
+            ▼                                          │  ransac.ComboRansac
+  tracks.csv + length_profiles.csv                     ▼
+            │                                    segments + DynamicInstability
+            │  ransac.kymograph (per-MT)               │
+            ▼                                          ▼
+   length plots + per-MT kymographs           f_cat / f_rescue / growth + shrink rates
+            │                                          │
+            └─────────────── napari ──────────────────┘
+                kapoorlabs-mtrack-optimizer     kapoorlabs-mtrack-ransac
+                (live fit + track + kymo)        (RANSAC + dynamic instability)
 ```
+
+Path 1 (left) fits the spline-Gaussian model frame-by-frame on 2-D
+or 2-D + time microscopy data, links MTs across frames into per-tip
+tracks, and reduces each track to a length profile + kymograph. Path
+2 (right) starts from a kymograph image directly (e.g. one produced
+by FIJI's "Reslice" + "Multi Kymograph", or by `ransac.kymograph` on
+a path-1 track) and decomposes it into linear growth / shrinkage
+segments to compute catastrophe + rescue frequencies. Both paths
+have a napari plugin and a headless API.
 
 ---
 
@@ -676,26 +692,34 @@ use case:
 
 | Goal | Install command | What you get |
 |---|---|---|
-| Use the optimizer / pipeline from scripts and notebooks | `pip install KapoorLabs-MTrack` | core: models, fit, simulate, pipeline, track, io |
-| Add the **napari plugin** for interactive fitting + tracking | `pip install KapoorLabs-MTrack[napari]` | core + napari + magicgui + Qt |
+| Use the optimizer + RANSAC math from scripts and notebooks | `pip install KapoorLabs-MTrack` | core: models, fit, simulate, pipeline, track, io, ransac |
+| Add **both napari plugins** for interactive fitting + RANSAC analysis | `pip install KapoorLabs-MTrack[napari]` | core + napari + magicgui + Qt + pandas |
 | Everything, including dev / test deps | `pip install KapoorLabs-MTrack[all]` | core + napari + pytest + pytest-qt |
 
 Or for the development version:
 
 ```bash
-pip install -e .            # core only
-pip install -e .[napari]    # core + plugin
+pip install -e .            # core only (no Qt)
+pip install -e .[napari]    # core + both napari plugins
 ```
 
-### Launching the napari plugin
+A single `[napari]` extra installs **both** plugins —
+`kapoorlabs-mtrack-optimizer` and `kapoorlabs-mtrack-ransac`. Each
+appears under napari's **Plugins** menu as its own widget; they share
+the core but never import each other.
+
+### Launching the napari plugins
 
 ```bash
+# Per-frame fitting + tracking on 2-D + time microscopy data.
 napari -w kapoorlabs-mtrack-optimizer "MTrack Optimizer"
+
+# RANSAC segmentation + dynamic instability on kymograph images.
+napari -w kapoorlabs-mtrack-ransac    "MTrack RANSAC"
 ```
 
-(or open napari and pick **Plugins → MTrack Optimizer**). The widget
-has four tabs — see "Napari plugin (kapoorlabs-mtrack-optimizer)"
-below.
+Or open napari and pick **Plugins → MTrack Optimizer** or **Plugins →
+MTrack RANSAC**. Sections below describe the tabs of each.
 
 ---
 
