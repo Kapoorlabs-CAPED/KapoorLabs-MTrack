@@ -197,7 +197,67 @@ def test_csv_writer_writes_expected_schema():
             }
 
 
+def test_zero_padded_crop_recovers_endpoints_when_filament_hits_edge():
+    """Regression test for the zero-padded crop behaviour.
+
+    A single MT is placed so its bbox bumps the right + bottom edges of
+    the image. The old ``_bbox_with_pad`` clipped the padding to the
+    image boundary, which gave the LM solver too few background pixels
+    on the truncated side. The new ``_zero_padded_crop`` always returns
+    a fixed-size ``(bbox_h + 2*pad, bbox_w + 2*pad)`` crop -- zeros
+    fill the side that fell outside the image -- so the solver always
+    sees the same amount of context regardless of where the filament
+    sits. The recovered endpoints must still land in **full-image**
+    coordinates.
+    """
+    import numpy as np
+    from skimage.morphology import dilation, disk
+
+    from kapoorlabs_mtrack.pipeline.fit_stack import fit_stack
+    from kapoorlabs_mtrack.simulate import add_shot_noise
+    from kapoorlabs_mtrack.simulate.synthetic import render_curve_image
+
+    shape = (40, 50)
+    sigma = np.array([1.6, 1.6])
+    b = 1.0 / (sigma * sigma)
+    # MT runs almost to the bottom-right corner.
+    a9 = np.array([12.0, 10.0, 47.0, 36.0, 0.7, 0.0, 0.0, 110.0, 6.0])
+
+    rng = np.random.default_rng(13)
+    scene = render_curve_image(a9, b, shape)
+    noisy = add_shot_noise(scene, read_noise_sigma=2.0, rng=rng)
+
+    # Build labels by rasterising + dilating the MT line.
+    mask = np.zeros(shape, dtype=bool)
+    n_steps = int(np.ceil(np.linalg.norm(a9[2:4] - a9[0:2]) * 2))
+    for tt in np.linspace(0.0, 1.0, n_steps + 1):
+        p = a9[0:2] * (1 - tt) + a9[2:4] * tt
+        rr, cc = int(round(p[1])), int(round(p[0]))
+        if 0 <= rr < shape[0] and 0 <= cc < shape[1]:
+            mask[rr, cc] = True
+    mask = dilation(mask, disk(2))
+    labels = np.zeros(shape, dtype=np.int32)
+    labels[mask] = 1
+    label_stack = labels[None, ...]
+    raw_stack = noisy[None, ...]
+
+    snapshots = fit_stack(
+        raw_stack, label_stack, sigma=tuple(sigma), jac_mode="hybrid"
+    )
+    assert len(snapshots) == 1 and len(snapshots[0].mts) == 1
+    m = snapshots[0].mts[0]
+    # Endpoints must come back in full-image coordinates (not crop-local).
+    assert 0.0 <= m.start[0] < shape[1] and 0.0 <= m.start[1] < shape[0]
+    assert 0.0 <= m.end[0] < shape[1] and 0.0 <= m.end[1] < shape[0]
+    start_err = float(np.linalg.norm(m.start - a9[0:2]))
+    end_err = float(np.linalg.norm(m.end - a9[2:4]))
+    print(f"edge case: start_err={start_err:.2f}px end_err={end_err:.2f}px")
+    assert start_err < 2.5, f"start off by {start_err:.2f}"
+    assert end_err < 2.5, f"end off by {end_err:.2f}"
+
+
 if __name__ == "__main__":
     test_fit_stack_pipeline_recovers_all_endpoints()
     test_csv_writer_writes_expected_schema()
+    test_zero_padded_crop_recovers_endpoints_when_filament_hits_edge()
     print("\nOK")

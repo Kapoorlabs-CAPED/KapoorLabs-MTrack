@@ -59,18 +59,40 @@ class FrameSnapshot:
     skipped_labels: list[tuple[int, str]]  # (label_id, reason)
 
 
-def _bbox_with_pad(
-    bbox: tuple[int, int, int, int], pad: int, shape: tuple[int, int]
-) -> tuple[int, int, int, int]:
-    """Inflate a (minr, minc, maxr, maxc) bbox by ``pad`` pixels, clipped to image."""
-    h, w = shape
+def _zero_padded_crop(
+    arr: np.ndarray, bbox: tuple[int, int, int, int], pad: int
+) -> tuple[np.ndarray, int, int]:
+    """Return a fixed-size ``(bbox_h + 2*pad, bbox_w + 2*pad)`` crop of ``arr``.
+
+    Regions of the requested crop that fall outside ``arr`` are filled
+    with zeros (the synthetic background the solver needs to fit the
+    Gaussian tails near the image edge). Returns
+    ``(crop, offset_y, offset_x)`` where ``offset = bbox_min - pad`` --
+    add these to a crop-local ``(x, y)`` to map back to full-image
+    coordinates.
+    """
+    h, w = arr.shape
     minr, minc, maxr, maxc = bbox
-    return (
-        max(0, minr - pad),
-        max(0, minc - pad),
-        min(h, maxr + pad),
-        min(w, maxc + pad),
-    )
+    new_h = (maxr - minr) + 2 * pad
+    new_w = (maxc - minc) + 2 * pad
+    out = np.zeros((new_h, new_w), dtype=arr.dtype)
+
+    # Intersection of the requested region with the source array.
+    src_r0 = max(0, minr - pad)
+    src_c0 = max(0, minc - pad)
+    src_r1 = min(h, maxr + pad)
+    src_c1 = min(w, maxc + pad)
+
+    # Destination offsets account for whatever got clipped at top/left.
+    dst_r0 = src_r0 - (minr - pad)
+    dst_c0 = src_c0 - (minc - pad)
+    dst_r1 = dst_r0 + (src_r1 - src_r0)
+    dst_c1 = dst_c0 + (src_c1 - src_c0)
+    out[dst_r0:dst_r1, dst_c0:dst_c1] = arr[src_r0:src_r1, src_c0:src_c1]
+
+    offset_y = minr - pad
+    offset_x = minc - pad
+    return out, offset_y, offset_x
 
 
 def _seed_from_region(
@@ -141,10 +163,13 @@ def fit_stack(
         skipped: list[tuple[int, str]] = []
         for prop in regionprops(labels):
             label_id = int(prop.label)
-            bbox = _bbox_with_pad(prop.bbox, pad, raw.shape)
-            r0, c0, r1, c1 = bbox
-            crop_raw = raw[r0:r1, c0:c1].astype(float)
-            crop_mask = labels[r0:r1, c0:c1] == label_id
+            crop_raw, off_y, off_x = _zero_padded_crop(
+                raw.astype(float), prop.bbox, pad
+            )
+            crop_mask_arr, _, _ = _zero_padded_crop(
+                (labels == label_id).astype(np.int32), prop.bbox, pad
+            )
+            crop_mask = crop_mask_arr.astype(bool)
             seeds = region_seeds_from_label(crop_mask)
             if not seeds.status.startswith("ok"):
                 skipped.append((label_id, seeds.status))
@@ -195,8 +220,11 @@ def fit_stack(
 
             for k, a8 in enumerate(per_mt_blocks):
                 # Translate crop-local (x, y) back to full-image (x, y).
-                start = np.array([a8[0] + c0, a8[1] + r0])
-                end = np.array([a8[2] + c0, a8[3] + r0])
+                # off_x / off_y already include the synthetic-pad offset,
+                # so this single addition handles both the bbox shift
+                # and the zero-padding border in one step.
+                start = np.array([a8[0] + off_x, a8[1] + off_y])
+                end = np.array([a8[2] + off_x, a8[3] + off_y])
                 mts.append(
                     MTSnapshot(
                         frame=t,

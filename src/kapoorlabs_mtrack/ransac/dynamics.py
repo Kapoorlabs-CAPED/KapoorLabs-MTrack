@@ -52,7 +52,7 @@ class Segment:
 
 @dataclass
 class DynamicInstability:
-    """Summary statistics for one kymograph."""
+    """Summary statistics for one kymograph (raw, in pixel / frame units)."""
 
     segments: list[Segment]
     n_catastrophes: int
@@ -66,6 +66,112 @@ class DynamicInstability:
     mean_shrinkage_rate: float  # length / time (negative)
     transitions: list[tuple[int, int, str]] = field(default_factory=list)
     # ^ list of (segment_idx_from, segment_idx_to, "catastrophe" | "rescue")
+
+
+@dataclass
+class CalibratedDynamicInstability:
+    """DI summary converted to physical units.
+
+    Conversions, given ``pixel_size`` (e.g. µm/pixel) and
+    ``time_per_frame`` (e.g. s/frame):
+
+    - rates       :  px/frame * (pixel_size / time_per_frame)  →  µm/s
+    - frequencies :  1/frame  * (1 / time_per_frame)           →  1/s
+    - times       :  frames   * time_per_frame                 →  s
+    """
+
+    raw: DynamicInstability
+    pixel_size: float
+    time_per_frame: float
+    space_unit: str  # e.g. "µm" or "nm"
+    time_unit: str  # e.g. "s"
+    n_catastrophes: int
+    n_rescues: int
+    time_in_growth: float  # in ``time_unit``
+    time_in_shrinkage: float
+    time_in_pause: float
+    catastrophe_frequency: float  # 1 / time_unit
+    rescue_frequency: float  # 1 / time_unit
+    mean_growth_rate: float  # space_unit / time_unit (positive)
+    mean_shrinkage_rate: float  # space_unit / time_unit (negative)
+
+
+def calibrate(
+    di: DynamicInstability,
+    pixel_size: float,
+    time_per_frame: float,
+    space_unit: str = "µm",
+    time_unit: str = "s",
+) -> CalibratedDynamicInstability:
+    """Convert a :class:`DynamicInstability` to physical units.
+
+    ``pixel_size`` is the length one pixel represents (e.g. µm), and
+    ``time_per_frame`` is the seconds elapsed per timepoint -- both
+    come from the microscope's acquisition metadata.
+    """
+    rate_scale = float(pixel_size) / float(time_per_frame)
+    freq_scale = 1.0 / float(time_per_frame)
+    time_scale = float(time_per_frame)
+    return CalibratedDynamicInstability(
+        raw=di,
+        pixel_size=float(pixel_size),
+        time_per_frame=float(time_per_frame),
+        space_unit=space_unit,
+        time_unit=time_unit,
+        n_catastrophes=di.n_catastrophes,
+        n_rescues=di.n_rescues,
+        time_in_growth=di.time_in_growth * time_scale,
+        time_in_shrinkage=di.time_in_shrinkage * time_scale,
+        time_in_pause=di.time_in_pause * time_scale,
+        catastrophe_frequency=di.catastrophe_frequency * freq_scale,
+        rescue_frequency=di.rescue_frequency * freq_scale,
+        mean_growth_rate=di.mean_growth_rate * rate_scale,
+        mean_shrinkage_rate=di.mean_shrinkage_rate * rate_scale,
+    )
+
+
+def segments_from_polylines(
+    polylines: list[np.ndarray],
+    slope_threshold: float = 0.5,
+) -> list[Segment]:
+    """Build :class:`Segment`\\s from user-drawn polylines on a kymograph.
+
+    Each polyline is a ``(2, 2)`` array of ``[[t0, x0], [t1, x1]]``
+    (napari Shapes "line" convention: row, col). For multi-vertex
+    polylines (``(N, 2)`` with N > 2) we collapse to a least-squares
+    line through the vertices. Segments are classified into
+    growth / shrinkage / pause by signed slope ``dx/dt``.
+    """
+    segs: list[Segment] = []
+    for line in polylines:
+        line = np.asarray(line, dtype=float)
+        if line.ndim != 2 or line.shape[1] != 2 or line.shape[0] < 2:
+            continue
+        ts = line[:, 0]
+        xs = line[:, 1]
+        if ts.max() == ts.min():
+            continue  # vertical line in time -- degenerate
+        # Fit x as a function of t (rate = dx/dt = length per unit time).
+        coeffs = np.polyfit(ts, xs, 1)
+        rate = float(coeffs[0])
+        intercept = float(coeffs[1])
+        t_lo, t_hi = float(ts.min()), float(ts.max())
+        if abs(rate) > slope_threshold:
+            kind: SegmentKind = "growth" if rate > 0 else "shrinkage"
+        else:
+            kind = "pause"
+        segs.append(
+            Segment(
+                slope=rate,
+                intercept=intercept,
+                t_start=t_lo,
+                t_end=t_hi,
+                kind=kind,
+                n_inliers=int(line.shape[0]),
+            )
+        )
+    segs.sort(key=lambda s: s.t_start)
+    return segs
 
 
 def _segments_from_ransac(

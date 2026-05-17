@@ -25,6 +25,58 @@ from kapoorlabs_mtrack.ransac import (
 )
 
 
+def segment_kymograph(
+    kymograph: np.ndarray,
+    source: str,
+    pretrained_name: str | None = None,
+    custom_path: str | None = None,
+    user_mask: np.ndarray | None = None,
+    n_tiles: tuple = (1, 1),
+) -> np.ndarray | None:
+    """Dispatch a segmentation source to a binary mask.
+
+    Sources:
+
+    - ``"otsu"`` -- return ``None``; caller falls through to
+      ``extract_kymograph_points``'s built-in Otsu + skeletonise path.
+    - ``"vollseg_pretrained"`` -- run the named vollseg UNET model.
+      Requires ``pip install KapoorLabs-MTrack[vollseg]``.
+    - ``"vollseg_custom"`` -- load a vollseg model from a directory.
+    - ``"user_mask"`` -- accept ``user_mask`` as the segmentation,
+      after casting to ``bool`` + shape-checking.
+    """
+    if source == "otsu":
+        return None
+    if source == "user_mask":
+        if user_mask is None:
+            raise ValueError(
+                "source='user_mask' but no user_mask was provided"
+            )
+        m = np.asarray(user_mask).astype(bool)
+        if m.shape != kymograph.shape:
+            raise ValueError(
+                f"user_mask shape {m.shape} != kymograph {kymograph.shape}"
+            )
+        return m
+    if source == "vollseg_pretrained":
+        from kapoorlabs_mtrack.ransac.vollseg_segment import (
+            segment_kymograph_pretrained,
+        )
+
+        return segment_kymograph_pretrained(
+            kymograph, model_name=pretrained_name, n_tiles=n_tiles
+        )
+    if source == "vollseg_custom":
+        from kapoorlabs_mtrack.ransac.vollseg_segment import (
+            segment_kymograph_custom,
+        )
+
+        return segment_kymograph_custom(
+            kymograph, model_dir=custom_path, n_tiles=n_tiles
+        )
+    raise ValueError(f"unknown segmentation source: {source!r}")
+
+
 @dataclass
 class RansacRunResult:
     """Per-segment intermediate result yielded by :func:`run_ransac_stream`."""

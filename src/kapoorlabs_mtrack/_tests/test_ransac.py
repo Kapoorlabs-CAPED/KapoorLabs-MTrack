@@ -142,6 +142,73 @@ def test_dynamic_instability_counts_catastrophe_and_rescue():
     assert abs(di.mean_shrinkage_rate - (-1.0)) < 1e-9
 
 
+def test_calibrate_converts_to_physical_units():
+    from kapoorlabs_mtrack.ransac import Segment, calibrate
+
+    segments = [
+        Segment(
+            slope=+2.0,
+            intercept=0.0,
+            t_start=0.0,
+            t_end=10.0,
+            kind="growth",
+            n_inliers=10,
+        ),
+        Segment(
+            slope=-3.0,
+            intercept=20.0,
+            t_start=10.0,
+            t_end=20.0,
+            kind="shrinkage",
+            n_inliers=10,
+        ),
+    ]
+    di = dynamic_instability(segments)
+    # pixel_size = 0.1 µm/px, frame interval = 0.5 s/frame.
+    cal = calibrate(di, pixel_size=0.1, time_per_frame=0.5)
+    # Growth rate: 2 px/frame * 0.1 µm/px / 0.5 s/frame = 0.4 µm/s.
+    assert abs(cal.mean_growth_rate - 0.4) < 1e-9
+    # Shrinkage rate: -3 * 0.1 / 0.5 = -0.6 µm/s.
+    assert abs(cal.mean_shrinkage_rate - (-0.6)) < 1e-9
+    # Catastrophe frequency: 1/10 1/frame / 0.5 = 0.2 1/s.
+    assert abs(cal.catastrophe_frequency - 0.2) < 1e-9
+    # Time in growth: 10 frames * 0.5 = 5 s.
+    assert abs(cal.time_in_growth - 5.0) < 1e-9
+    assert cal.space_unit == "µm" and cal.time_unit == "s"
+    assert cal.raw is di
+
+
+def test_segments_from_polylines_recovers_kinds():
+    from kapoorlabs_mtrack.ransac import segments_from_polylines
+
+    polylines = [
+        np.array([[0.0, 10.0], [10.0, 30.0]]),  # growth: dx/dt = +2
+        np.array([[10.0, 30.0], [20.0, 5.0]]),  # shrinkage: dx/dt = -2.5
+        np.array([[20.0, 5.0], [25.0, 6.0]]),  # pause: dx/dt = +0.2
+    ]
+    segs = segments_from_polylines(polylines, slope_threshold=0.5)
+    assert [s.kind for s in segs] == ["growth", "shrinkage", "pause"]
+    assert abs(segs[0].slope - 2.0) < 1e-9
+    assert abs(segs[1].slope - (-2.5)) < 1e-9
+
+
+def test_vollseg_segment_raises_clear_error_when_vollseg_missing():
+    from kapoorlabs_mtrack.ransac.vollseg_segment import (
+        VollsegNotInstalledError,
+        segment_kymograph_pretrained,
+    )
+
+    img = np.zeros((20, 20), dtype=np.uint8)
+    try:
+        segment_kymograph_pretrained(img, model_name="foo")
+    except VollsegNotInstalledError as exc:
+        assert "vollseg is not installed" in str(exc)
+    except ImportError:
+        # If vollseg IS installed in the env, it can still legitimately
+        # raise because "foo" isn't a real model -- treat as pass.
+        pass
+
+
 def test_pause_between_growth_and_shrink_still_counts_as_catastrophe():
     from kapoorlabs_mtrack.ransac import Segment
 
@@ -182,5 +249,8 @@ if __name__ == "__main__":
     test_quadratic_function_distance_finite_on_offset_point()
     test_ransac_recovers_three_growth_shrink_growth_segments()
     test_dynamic_instability_counts_catastrophe_and_rescue()
+    test_calibrate_converts_to_physical_units()
+    test_segments_from_polylines_recovers_kinds()
+    test_vollseg_segment_raises_clear_error_when_vollseg_missing()
     test_pause_between_growth_and_shrink_still_counts_as_catastrophe()
     print("\nOK")

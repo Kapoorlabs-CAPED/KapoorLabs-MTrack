@@ -24,10 +24,13 @@ Public API:
 """
 
 from .dynamics import (
+    CalibratedDynamicInstability,
     DynamicInstability,
     Segment,
+    calibrate,
     classify_segments,
     dynamic_instability,
+    segments_from_polylines,
 )
 from .fits import ComboRansac, Ransac
 from .kymograph_extract import extract_kymograph_points
@@ -47,7 +50,10 @@ __all__ = [
     "ComboRansac",
     "Segment",
     "DynamicInstability",
+    "CalibratedDynamicInstability",
+    "calibrate",
     "classify_segments",
     "dynamic_instability",
+    "segments_from_polylines",
     "extract_kymograph_points",
 ]

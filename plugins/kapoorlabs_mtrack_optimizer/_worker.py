@@ -25,8 +25,8 @@ from kapoorlabs_mtrack.models import multi
 from kapoorlabs_mtrack.pipeline.fit_stack import (
     FrameSnapshot,
     MTSnapshot,
-    _bbox_with_pad,
     _seed_from_region,
+    _zero_padded_crop,
 )
 from kapoorlabs_mtrack.pipeline.skeleton import region_seeds_from_label
 from kapoorlabs_mtrack.track import (
@@ -58,10 +58,13 @@ def fit_stack_stream(
         skipped: list[tuple[int, str]] = []
         for prop in regionprops(labels):
             label_id = int(prop.label)
-            bbox = _bbox_with_pad(prop.bbox, pad, raw.shape)
-            r0, c0, r1, c1 = bbox
-            crop_raw = raw[r0:r1, c0:c1].astype(float)
-            crop_mask = labels[r0:r1, c0:c1] == label_id
+            crop_raw, off_y, off_x = _zero_padded_crop(
+                raw.astype(float), prop.bbox, pad
+            )
+            crop_mask_arr, _, _ = _zero_padded_crop(
+                (labels == label_id).astype(np.int32), prop.bbox, pad
+            )
+            crop_mask = crop_mask_arr.astype(bool)
             seeds = region_seeds_from_label(crop_mask)
             if not seeds.status.startswith("ok"):
                 skipped.append((label_id, seeds.status))
@@ -108,8 +111,8 @@ def fit_stack_stream(
                 continue
 
             for k, a8 in enumerate(per_mt_blocks):
-                start = np.array([a8[0] + c0, a8[1] + r0])
-                end = np.array([a8[2] + c0, a8[3] + r0])
+                start = np.array([a8[0] + off_x, a8[1] + off_y])
+                end = np.array([a8[2] + off_x, a8[3] + off_y])
                 mts.append(
                     MTSnapshot(
                         frame=t,

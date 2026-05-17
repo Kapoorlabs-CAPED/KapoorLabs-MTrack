@@ -807,27 +807,84 @@ di = dynamic_instability(
 )
 ```
 
+### Segmentation sources
+
+The Input tab's **Segmentation source** combo picks how the kymograph
+gets turned into a binary mask before RANSAC:
+
+| Source | Needs | When to use |
+|---|---|---|
+| `Otsu + skeletonize` (default) | core only | clean kymographs with sharp filament edges |
+| `vollseg pretrained` | `pip install KapoorLabs-MTrack[vollseg]` | low-SNR data; pretrained UNET from `vollseg.pretrained.get_registered_models(UNET)` |
+| `vollseg custom path` | `[vollseg]` extra | locally-trained UNET in a `basedir/name/` directory |
+| `user mask layer` | none | edit / paint a napari labels layer (e.g. correcting an auto seg) and feed it back |
+
+Vollseg is **opt-in**: the core has no dependency on TensorFlow / csbdeep.
+Pick the vollseg source from the combo and the plugin lazy-imports it;
+if it isn't installed you get a clear `VollsegNotInstalledError` with
+the install hint, the plugin doesn't crash.
+
+### User-drawn line override
+
+Even after RANSAC has produced segments, you may want to **manually
+correct** a kink it missed or split a segment. Workflow:
+
+1. In napari, create a **Shapes** layer named `user lines` (or whatever
+   the Results tab's **user lines layer name** says).
+2. Draw `line` or `path` shapes on the kymograph -- each becomes one
+   segment. The vertices' (row, col) values are read as (time, position).
+3. Click **Recompute DI from user lines** in the Results tab.
+
+The plugin replaces the auto-detected segments with the polylines
+parsed via `ransac.segments_from_polylines`, reclassifies them via
+the same `slope_threshold` used by the RANSAC pass, and re-runs
+`dynamic_instability`. The Results panel + CSV export refresh
+accordingly. This is identical to the override behaviour of the
+original `vollseg-napari-mtrack` -- just rebuilt without the
+`caped_ai_tabulour` widget.
+
+### Microscope calibration → physical units
+
+The Results tab exposes four calibration fields:
+
+- **pixel size** (default 1.0) -- length one pixel represents
+- **space unit** (default `µm`)
+- **seconds per frame** (default 1.0)
+- **time unit** (default `s`)
+
+`ransac.calibrate(di, pixel_size, time_per_frame)` converts:
+
+| Quantity | px / frame → physical |
+|---|---|
+| growth rate | `r * (pixel_size / time_per_frame)` → space/time |
+| shrinkage rate | same conversion (sign preserved) |
+| catastrophe frequency | `f / time_per_frame` → 1/time |
+| rescue frequency | same |
+| time in growth / shrinkage / pause | `T * time_per_frame` → time units |
+
+The Results text panel renders **both** the raw `px/frame` numbers
+and the calibrated physical numbers side by side, so you can sanity-
+check the conversion. The CSV export carries both columns
+(`value` + `value_calibrated`) plus `unit_raw` and `unit_cal` so the
+downstream stays self-documenting.
+
 ### What the rewrite changes vs `vollseg-napari-mtrack`
 
-This plugin replaces the original `vollseg-napari-mtrack` and removes
-three weight bearing dependencies the original carried:
+The new plugin keeps all the capabilities of the original and drops
+the deficiencies:
 
-1. **No `vollseg` / `stardist` dependency.** The original called
-   `VollSeg` to segment kymographs before RANSAC; this plugin uses
-   `skimage.filters.threshold_otsu` + `skeletonize` (already required
-   for the rest of the pipeline) and lets the user pass a precomputed
-   mask if they have a better segmentation.
-2. **No `caped_ai_tabulour` custom Qt table widget.** Replaced with a
-   plain `magicgui.Label` block plus CSV export — far smaller dep
-   surface, fewer style issues, copy-pastable into any other GUI.
-3. **No `seaborn` dependency for the plots.** The new widget displays
-   results inline as text + a Shapes overlay; users who want fancier
-   plots can use the exported `segments.csv` + `summary.csv` in any
-   notebook (matplotlib is already a core dep).
+| Capability | Old plugin | New plugin |
+|---|---|---|
+| Vollseg UNET segmentation | required dep | **optional** (`[vollseg]` extra), source combo |
+| User mask override | scripted (paint into the right layer) | **first-class** source choice |
+| User-drawn line override | scripted | **first-class** button in Results tab |
+| Microscope calibration → µm/s, 1/s | yes | **yes** (now also in CSV) |
+| `caped_ai_tabulour` custom table | required | **dropped** (text panel + CSV) |
+| `seaborn` for plots | required | **dropped** (matplotlib only, on-demand) |
+| `vollseg` / `stardist` always pulled | yes | **only with the extra** |
+| Widget LOC | ~1600 monolith | ~400 across `_widget` + `_worker` + `_reader` |
 
-The 1600-line monolithic `_widget.py` of the original is now split
-into `_widget.py` (UI), `_worker.py` (streaming RANSAC runner), and
-`_reader.py` (TIFF loader), totalling ~350 lines.
+Same biology, same UI affordances, optional heavy deps.
 
 ## Contributing
 
