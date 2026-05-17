@@ -314,12 +314,20 @@ KapoorLabs-MTrack/
 │   │   ├── hungarian.py              # track_snapshots, MTTrack
 │   │   ├── profile.py                # build_length_profiles, label_plus_minus
 │   │   └── kymograph.py              # build_kymograph
+│   ├── ransac/                       # kymograph-level RANSAC + DI analysis
+│   │   ├── __init__.py
+│   │   ├── models.py                 # LinearFunction, QuadraticFunction, ...
+│   │   ├── fits.py                   # Ransac, ComboRansac
+│   │   ├── dynamics.py               # Segment, classify_segments,
+│   │   │                             # dynamic_instability
+│   │   └── kymograph_extract.py      # extract_kymograph_points
 │   └── _tests/
 │       ├── test_gradient.py          # analytic vs numeric per-parameter table
 │       ├── test_pipeline.py          # simulate → fit → assert endpoints
 │       ├── test_joint.py             # two crossing MTs jointly fit
 │       ├── test_fit_stack.py         # full (T,H,W) pipeline end-to-end
-│       └── test_track.py             # tracker identity + plus/minus + intensity
+│       ├── test_track.py             # tracker identity + plus/minus + intensity
+│       └── test_ransac.py            # RANSAC math + dynamic-instability counts
 ├── scripts/                          # CLI tools that import the package
 │   ├── fit_endpoints.py              # raw + label TIFF → endpoints.csv
 │   └── track_endpoints.py            # endpoints.csv → tracks + length profiles
@@ -505,6 +513,133 @@ before it is terminated (default 0).
 
 ---
 
+## Kymograph RANSAC and dynamic-instability analysis
+
+The `kapoorlabs_mtrack.ransac` subpackage is a **clean port** of the
+RANSAC fits from `caped-ai-mtrack` plus a fresh dynamic-instability
+analyzer on top. It operates on **kymograph images** (one MT per
+image, x = position along the MT, y = time, intensity = fluorescence)
+and produces the canonical biology report: growth/shrinkage segments,
+catastrophe / rescue counts, and frequencies.
+
+### Pipeline
+
+```
+kymograph TIFF
+      │
+      │  ransac.extract_kymograph_points()           (threshold + skeletonise)
+      ▼
+(t, x) point cloud
+      │
+      │  ransac.Ransac(...).extract_multiple_lines() (sequential RANSAC peel)
+      ▼
+list of (estimator, inlier_points) segments
+      │
+      │  ransac.classify_segments()                  (label growth/shrink/pause)
+      │  ransac.dynamic_instability()
+      ▼
+DynamicInstability summary
+   • n_catastrophes,  n_rescues
+   • catastrophe_frequency, rescue_frequency
+   • mean_growth_rate, mean_shrinkage_rate
+   • time_in_growth, time_in_shrinkage, time_in_pause
+```
+
+### Quickstart
+
+```python
+import numpy as np
+from kapoorlabs_mtrack.ransac import (
+    LinearFunction, Ransac,
+    classify_segments, dynamic_instability,
+    extract_kymograph_points,
+)
+
+img = np.load("my_kymograph.npy")           # 2-D: (time, position)
+points = extract_kymograph_points(img)       # (N, 2) of (t, x)
+
+rs = Ransac(
+    data_points=points.tolist(),
+    model_class=LinearFunction, degree=2,
+    min_samples=10, max_trials=200, iterations=8,
+    residual_threshold=2.0, timeindex=0, random_state=0,
+)
+estimators, inliers = rs.extract_multiple_lines()
+
+segments = classify_segments(estimators, inliers,
+                              slope_threshold=0.4)
+di = dynamic_instability(segments)
+
+print(f"catastrophes: {di.n_catastrophes}, rescues: {di.n_rescues}")
+print(f"f_cat = {di.catastrophe_frequency:.4f}/frame, "
+      f"f_res = {di.rescue_frequency:.4f}/frame")
+print(f"growth rate {di.mean_growth_rate:+.2f}, "
+      f"shrink rate {di.mean_shrinkage_rate:+.2f}")
+```
+
+### Two-pass ComboRansac for curved + linear segments
+
+When the MT changes direction with a curved transition before settling
+into linear motion (transit between depolymerising and polymerising
+phases), use `ComboRansac` -- it peels quadratic segments first then
+re-fits linear segments over those inliers:
+
+```python
+from kapoorlabs_mtrack.ransac import (
+    ComboRansac, LinearFunction, QuadraticFunction,
+)
+
+cr = ComboRansac(
+    data_points=points.tolist(),
+    model_linear=LinearFunction,
+    model_quadratic=QuadraticFunction,
+    min_samples=10, max_trials=200, iterations=8,
+    residual_threshold=2.0,
+)
+estimators, inliers = cr.extract_multiple_lines()
+```
+
+### What was ported, and what got dropped
+
+Ported (from `caped-ai-mtrack`):
+
+- `RansacModels/*` → `ransac/models.py` -- `LinearFunction`,
+  `QuadraticFunction` (with the exact cubic-root distance via Cardano),
+  `PolynomialFunction` (now uses `numpy.polyfit` for speed at higher
+  degrees), `GeneralizedFunction` base.
+- `Fits/ransac.py` + `Fits/comboransac.py` → `ransac/fits.py` --
+  `Ransac` and `ComboRansac` with the **PNG-writing side effects
+  removed**: the original called `plot_ransac_gt(...)` to a hard-coded
+  path inside the extraction loop; we just return estimators and let
+  the caller plot.
+- `Fits/utils.py:clean_estimators` → kept as private
+  `_dedup_estimators_by_envelope`; the second-pass slope/endpoint
+  prune was dropped (it over-segmented on synthetic data).
+
+Dropped:
+
+- `vollseg`/`stardist` segmentation dependency -- replaced with
+  `skimage.filters.threshold_otsu` + `skimage.morphology.skeletonize`
+  in `extract_kymograph_points`.
+- `Fits/regression.py`, `Solvers/newton_raphson.py` -- unused by the
+  public RANSAC API.
+- PNG writing in `clean_ransac`/`plot_ransac_gt` -- replaced with
+  pure data-returning functions; callers do their own plotting.
+- The hand-rolled normal-equation accumulator for higher-degree
+  polynomials -- `PolynomialFunction` now defers to `numpy.polyfit`.
+
+Added (not in original):
+
+- `ransac/dynamics.py` -- `Segment` dataclass + `classify_segments`
+  + `dynamic_instability` to turn RANSAC output into the
+  catastrophe-frequency / rescue-frequency / mean-rate report the
+  biology actually needs.
+- Pause-aware transition counting -- a pause segment between growth
+  and shrinkage still counts as one catastrophe (the directional
+  change is what matters).
+
+---
+
 ## Roadmap
 
 | Stage | Status | Module |
@@ -523,6 +658,8 @@ before it is terminated (default 0).
 | 12. Per-MT kymograph builder | ✅ shipped | `track.kymograph` |
 | 13. Interactive notebooks driving the full chain | ✅ shipped | `notebooks/` |
 | 14. Napari plugin (live fit + track + kymograph; optional install) | ✅ shipped | `plugins/kapoorlabs_mtrack_optimizer/` |
+| 15. RANSAC kymograph segmentation + dynamic-instability analysis (ported & cleaned from `caped-ai-mtrack`) | ✅ shipped | `kapoorlabs_mtrack.ransac` |
+| 16. Napari plugin `kapoorlabs-mtrack-ransac` (RANSAC fits + catastrophe/rescue UI) | ⏳ next | `plugins/kapoorlabs_mtrack_ransac/` |
 
 ---
 
