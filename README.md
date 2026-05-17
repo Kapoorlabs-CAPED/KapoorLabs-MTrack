@@ -335,11 +335,17 @@ KapoorLabs-MTrack/
 │   ├── 01_simulate_and_fit.ipynb     # one MT: simulate, fit, gradient check
 │   └── 02_real_data_pipeline.ipynb   # multi-MT movie → fit → track → kymograph
 └── plugins/                          # optional install via pip ...[napari]
-    └── kapoorlabs_mtrack_optimizer/  # napari widget (Input | Fit | Track | Results)
+    ├── kapoorlabs_mtrack_optimizer/  # napari widget (Input | Fit | Track | Results)
+    │   ├── napari.yaml               # plugin manifest
+    │   ├── _widget.py                # tabbed magicgui UI
+    │   ├── _worker.py                # streaming fit_stack for live overlays
+    │   ├── _reader.py                # TIFF reader for raw + label pairs
+    │   └── _tests/test_worker.py     # headless smoke test
+    └── kapoorlabs_mtrack_ransac/     # kymograph RANSAC + dynamic instability
         ├── napari.yaml               # plugin manifest
-        ├── _widget.py                # tabbed magicgui UI
-        ├── _worker.py                # streaming fit_stack for live overlays
-        ├── _reader.py                # TIFF reader for raw + label pairs
+        ├── _widget.py                # tabbed UI (Input | RANSAC | Results)
+        ├── _worker.py                # run_ransac_stream (segment-by-segment)
+        ├── _reader.py                # kymograph TIFF reader
         └── _tests/test_worker.py     # headless smoke test
 ```
 
@@ -659,7 +665,7 @@ Added (not in original):
 | 13. Interactive notebooks driving the full chain | ✅ shipped | `notebooks/` |
 | 14. Napari plugin (live fit + track + kymograph; optional install) | ✅ shipped | `plugins/kapoorlabs_mtrack_optimizer/` |
 | 15. RANSAC kymograph segmentation + dynamic-instability analysis (ported & cleaned from `caped-ai-mtrack`) | ✅ shipped | `kapoorlabs_mtrack.ransac` |
-| 16. Napari plugin `kapoorlabs-mtrack-ransac` (RANSAC fits + catastrophe/rescue UI) | ⏳ next | `plugins/kapoorlabs_mtrack_ransac/` |
+| 16. Napari plugin `kapoorlabs-mtrack-ransac` (RANSAC fits + catastrophe/rescue UI) | ✅ shipped | `plugins/kapoorlabs_mtrack_ransac/` |
 
 ---
 
@@ -728,6 +734,76 @@ loop but **yields** after each frame, which `thread_worker(connect={
 updates. This keeps the core importable in headless environments
 (servers, CI, plain Python scripts) while letting the plugin scrub
 frames live.
+
+---
+
+## Napari plugin (`kapoorlabs-mtrack-ransac`)
+
+Companion plugin to the optimizer — operates on **kymograph images**
+(one MT per image, x = position along the MT, y = time) and reports
+the canonical dynamic-instability statistics. Same `pip install
+KapoorLabs-MTrack[napari]` brings both plugins in.
+
+Launch:
+
+```bash
+napari -w kapoorlabs-mtrack-ransac "MTrack RANSAC"
+```
+
+### Tabs
+
+| Tab | Contents |
+|---|---|
+| **Input** | `FileEdit` for the kymograph TIFF, optional `FileEdit` for a precomputed mask. **Load** drops the kymograph into napari as an `inferno`-colormapped image layer (and the mask as `labels` if provided). |
+| **RANSAC** | `mode` (linear vs combo), `min_samples`, `max_trials`, `iterations`, `residual_threshold` (px), `slope_threshold` (px/frame; below this a segment is called a *pause*), `random_state`. **Run RANSAC (live)** spawns a `thread_worker` driven by `kapoorlabs_mtrack_ransac._worker.run_ransac_stream`. Each extracted segment is yielded immediately and appended as a yellow line to a **RANSAC segments** Shapes overlay on the kymograph, so the user watches the segments accumulate. The trailing summary yield carries the full `DynamicInstability` report. |
+| **Results** | Text panel with catastrophe / rescue counts, frequencies (`events / time_in_state`), mean growth and shrinkage rates, time-in-state totals; per-segment listing (kind, slope, time bounds, inlier count); **Export CSV** writes `segments.csv` + `summary.csv`. |
+
+### Reusing the math without napari
+
+Every Results-tab number is computed by the headless core; nothing in
+the plotting layer is original to the plugin. To do the same analysis
+from a script:
+
+```python
+from kapoorlabs_mtrack.ransac import (
+    Ransac, LinearFunction,
+    classify_segments, dynamic_instability,
+    extract_kymograph_points,
+)
+
+img = tifffile.imread("kymograph.tif")
+pts = extract_kymograph_points(img)
+estimators, inliers = Ransac(
+    pts.tolist(), LinearFunction, degree=2,
+    min_samples=10, max_trials=200, iterations=8,
+    residual_threshold=2.0, timeindex=0,
+).extract_multiple_lines()
+di = dynamic_instability(
+    classify_segments(estimators, inliers, slope_threshold=0.4)
+)
+```
+
+### What the rewrite changes vs `vollseg-napari-mtrack`
+
+This plugin replaces the original `vollseg-napari-mtrack` and removes
+three weight bearing dependencies the original carried:
+
+1. **No `vollseg` / `stardist` dependency.** The original called
+   `VollSeg` to segment kymographs before RANSAC; this plugin uses
+   `skimage.filters.threshold_otsu` + `skeletonize` (already required
+   for the rest of the pipeline) and lets the user pass a precomputed
+   mask if they have a better segmentation.
+2. **No `caped_ai_tabulour` custom Qt table widget.** Replaced with a
+   plain `magicgui.Label` block plus CSV export — far smaller dep
+   surface, fewer style issues, copy-pastable into any other GUI.
+3. **No `seaborn` dependency for the plots.** The new widget displays
+   results inline as text + a Shapes overlay; users who want fancier
+   plots can use the exported `segments.csv` + `summary.csv` in any
+   notebook (matplotlib is already a core dep).
+
+The 1600-line monolithic `_widget.py` of the original is now split
+into `_widget.py` (UI), `_worker.py` (streaming RANSAC runner), and
+`_reader.py` (TIFF loader), totalling ~350 lines.
 
 ## Contributing
 

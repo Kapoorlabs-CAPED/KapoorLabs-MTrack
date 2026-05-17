@@ -1,0 +1,17 @@
+name: kapoorlabs-mtrack-ransac
+display_name: KapoorLabs MTrack RANSAC
+contributions:
+  commands:
+    - id: kapoorlabs-mtrack-ransac.widget
+      python_name: kapoorlabs_mtrack_ransac._widget:plugin_wrapper_ransac
+      title: MTrack RANSAC
+    - id: kapoorlabs-mtrack-ransac.get_reader
+      python_name: kapoorlabs_mtrack_ransac._reader:napari_get_reader
+      title: Open kymograph TIFF
+  readers:
+    - command: kapoorlabs-mtrack-ransac.get_reader
+      accepts_directories: true
+      filename_patterns: ['*.tif', '*.tiff']
+  widgets:
+    - command: kapoorlabs-mtrack-ransac.widget
+      display_name: MTrack RANSAC
