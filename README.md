@@ -13,10 +13,24 @@ against the observed image with Levenberg–Marquardt. Deprecates the
 original Fiji / imglib2 plugin.
 
 **End goal**: per-microtubule length profiles over time, separated into
-plus-end and minus-end trajectories. The pipeline here delivers stage 1
-(per-frame, per-MT endpoints from a TIFF stack with segmentation
-labels); the tracker that links those endpoints into trajectories with
-a Hungarian + two-frame velocity cost is the next push.
+plus-end and minus-end trajectories, with per-MT kymographs. The
+pipeline runs in three stages:
+
+```
+TIFF stack + label TIFF
+        │
+        │  scripts/fit_endpoints.py     (stage 8)
+        ▼
+endpoints.csv                           per-frame, per-MT model fits
+        │
+        │  scripts/track_endpoints.py   (stages 9-10)
+        ▼
+tracks.csv + length_profiles.csv        plus/minus tip trajectories
+        │
+        │  notebooks/02_*.ipynb         (visualisation)
+        ▼
+length plots + kymographs               per microtubule
+```
 
 ---
 
@@ -280,26 +294,45 @@ KapoorLabs-MTrack/
 │   │   └── gradient_check.py         # numeric_jacobian, check_jacobian
 │   ├── simulate/                     # synthetic image generation
 │   │   ├── __init__.py
-│   │   └── synthetic.py              # render_curve_image, add_shot_noise
+│   │   ├── synthetic.py              # render_curve_image, add_shot_noise
+│   │   └── movie.py                  # multi-MT (T,H,W) movies + labels
 │   ├── fit/                          # scipy LM wrappers
 │   │   ├── __init__.py
 │   │   ├── lm.py                     # fit_endpoints (single MT)
 │   │   └── joint.py                  # fit_endpoints_joint (N MTs in crop)
-│   ├── io/                           # TIFF I/O for raw + label pairs
+│   ├── io/                           # TIFF I/O + CSV writers
 │   │   ├── __init__.py
-│   │   └── tif.py                    # load_pair, save_endpoints_csv
+│   │   └── tif.py                    # load_pair, save_endpoints_csv,
+│   │                                 # save_length_profiles_csv
 │   ├── pipeline/                     # orchestration: stack → snapshots
 │   │   ├── __init__.py
 │   │   ├── skeleton.py               # region_seeds_from_label
 │   │   └── fit_stack.py              # fit_stack, snapshots_to_csv_rows
+│   ├── track/                        # link snapshots into per-MT tracks
+│   │   ├── __init__.py
+│   │   ├── cost.py                   # TrackingCost, mt_to_mt_cost
+│   │   ├── hungarian.py              # track_snapshots, MTTrack
+│   │   ├── profile.py                # build_length_profiles, label_plus_minus
+│   │   └── kymograph.py              # build_kymograph
 │   └── _tests/
 │       ├── test_gradient.py          # analytic vs numeric per-parameter table
 │       ├── test_pipeline.py          # simulate → fit → assert endpoints
 │       ├── test_joint.py             # two crossing MTs jointly fit
-│       └── test_fit_stack.py         # full (T,H,W) pipeline end-to-end
+│       ├── test_fit_stack.py         # full (T,H,W) pipeline end-to-end
+│       └── test_track.py             # tracker identity + plus/minus + intensity
 ├── scripts/                          # CLI tools that import the package
-│   └── fit_endpoints.py              # raw + label TIFF → endpoints.csv
-└── notebooks/                        # interactive walk-throughs
+│   ├── fit_endpoints.py              # raw + label TIFF → endpoints.csv
+│   └── track_endpoints.py            # endpoints.csv → tracks + length profiles
+├── notebooks/                        # interactive walk-throughs
+│   ├── 01_simulate_and_fit.ipynb     # one MT: simulate, fit, gradient check
+│   └── 02_real_data_pipeline.ipynb   # multi-MT movie → fit → track → kymograph
+└── plugins/                          # optional install via pip ...[napari]
+    └── kapoorlabs_mtrack_optimizer/  # napari widget (Input | Fit | Track | Results)
+        ├── napari.yaml               # plugin manifest
+        ├── _widget.py                # tabbed magicgui UI
+        ├── _worker.py                # streaming fit_stack for live overlays
+        ├── _reader.py                # TIFF reader for raw + label pairs
+        └── _tests/test_worker.py     # headless smoke test
 ```
 
 ---
@@ -369,6 +402,109 @@ will not recompute it numerically unless you select `jac_mode="numeric"`.
 
 ---
 
+## Tracking microtubules across frames
+
+`track.track_snapshots` links per-frame `MTSnapshot`s into per-MT
+trajectories with the Jaqaman-style LAP formulation (Hungarian over an
+augmented matrix with explicit birth and death). For each candidate
+link `prev → curr` the cost is a **weighted sum of toggleable terms**:
+
+| Term | Default | Formula |
+|---|---|---|
+| `distance` | always on | $\|\text{predicted}_\text{tip} - \text{observed}_\text{tip}\|^2$, summed over both tips, **minimised over the two tip permutations** |
+| `intensity` | on | $w_\text{int}\cdot(\Delta A / s)^2$ where $s$ = `amp_scale` |
+| `curvature` | on | $w_\text{cur}\cdot(\Delta C)^2$ |
+| `ds` | off | $w_\text{ds}\cdot(\Delta\,ds)^2$ |
+
+Tip positions are predicted by adding a 2-frame velocity to the
+previous tip position (controlled by `velocity_lookback`). Links with
+total cost above `gate` are forbidden, forcing the LAP to choose
+birth + death instead.
+
+### Toggling cost components
+
+```python
+from kapoorlabs_mtrack.track import TrackingCost, track_snapshots
+
+cfg = TrackingCost(
+    enable_intensity=True,
+    enable_curvature=True,
+    enable_ds=False,
+    weights={"distance": 1.0, "intensity": 0.3, "curvature": 0.5, "ds": 0.2},
+    amp_scale=100.0,
+    gate=50.0**2,
+    velocity_lookback=2,
+)
+tracks = track_snapshots(frame_snapshots, cfg=cfg)
+```
+
+### Tip identity across frames
+
+The model's `start` / `end` labels are arbitrary — the same physical
+tip can be `start` in one frame and `end` in the next. The cost
+function evaluates **both possible tip permutations** for every
+candidate link, and the winning permutation is fed back into the track
+so each track exposes a stable `tip_a` / `tip_b` identity. Post-hoc,
+`track.label_plus_minus` labels the more dynamic tip (longer total
+path length) as **plus**.
+
+### Length profiles
+
+`track.build_length_profiles(tracks)` returns one `LengthProfile` per
+track, containing per-frame:
+
+- `plus_xy`, `minus_xy` — tip positions after plus/minus assignment
+- `tip_distance` — straight-line distance between tips
+- `arc_length` — length of the swept curve at this frame, computed by
+  re-walking the spline with the fitted `ds` / `curvature`
+
+These ship to disk via `io.save_length_profiles_csv` for downstream
+plotting.
+
+### Kymographs
+
+`track.build_kymograph(profile)` returns a `Kymograph` with a 2-D
+image where time runs down the y-axis and the **signed position along
+the MT's initial axis** runs along the x-axis. The axis is defined as
+the unit vector from the minus tip at frame 0 to the plus tip at
+frame 0; both tips' positions at every later frame are projected onto
+this axis to populate the image. Pass `mode="intensity"` with an
+`amplitudes` array to weight the kymograph by fitted intensity per
+frame, or `mode="binary"` for an occupancy heatmap.
+
+The notebook `notebooks/02_real_data_pipeline.ipynb` plots these for
+every fitted MT — the classic "growing line" shape for a polymerising
+MT, "shrinking line" for a depolymerising one, and any combination
+thereof.
+
+### CLI
+
+```bash
+python scripts/track_endpoints.py \
+    --endpoints endpoints.csv \
+    --out-tracks tracks.csv \
+    --out-profiles length_profiles.csv \
+    --gate 50 --velocity-lookback 2
+```
+
+Toggle terms from the CLI with `--no-intensity`, `--no-curvature`,
+`--enable-ds`. `--max-gap N` lets a track survive N empty frames
+before it is terminated (default 0).
+
+### Length-profile CSV schema (`length_profiles.csv`)
+
+| Column | Meaning |
+|---|---|
+| `mt_id` | track identifier (assigned by the tracker) |
+| `frame` | timepoint |
+| `plus_x`, `plus_y` | plus-tip position in full-image pixels |
+| `minus_x`, `minus_y` | minus-tip position |
+| `tip_distance` | straight-line ‖plus − minus‖ |
+| `arc_length` | length of the fitted spline curve between the tips |
+| `plus_was_tip` | `A` or `B` — which raw tip-track was labelled plus |
+
+---
+
 ## Roadmap
 
 | Stage | Status | Module |
@@ -381,24 +517,80 @@ will not recompute it numerically unless you select `jac_mode="numeric"`.
 | 6. TIFF I/O for raw + label pairs | ✅ shipped | `io.tif` |
 | 7. Skeleton-based per-region seeding + endpoint pairing | ✅ shipped | `pipeline.skeleton` |
 | 8. Stack orchestrator (per-frame, per-label fits → CSV) | ✅ shipped | `pipeline.fit_stack`, `scripts/fit_endpoints.py` |
-| 9. Hungarian tracker (cost: distance + intensity + curvature, 2-frame velocity prediction, gating, plus/minus labelling) | ⏳ next | `track/` |
-| 10. Length-profile output (per-MT plus-end and minus-end length-vs-time) | ⏳ after tracker | |
-| 11. Multi-frame synthetic movie generator (for tracker tests) | ⏳ alongside tracker | `scripts/simulate_movie.py` |
-| 12. Interactive notebooks driving the full chain | ⏳ alongside tracker | `notebooks/` |
+| 9. Hungarian tracker (cost: distance + intensity + curvature, 2-frame velocity prediction, gating, plus/minus labelling) | ✅ shipped | `track.hungarian`, `track.cost` |
+| 10. Length-profile output (per-MT plus-end and minus-end length-vs-time) | ✅ shipped | `track.profile`, `scripts/track_endpoints.py` |
+| 11. Multi-frame synthetic movie generator | ✅ shipped | `simulate.movie` |
+| 12. Per-MT kymograph builder | ✅ shipped | `track.kymograph` |
+| 13. Interactive notebooks driving the full chain | ✅ shipped | `notebooks/` |
+| 14. Napari plugin (live fit + track + kymograph; optional install) | ✅ shipped | `plugins/kapoorlabs_mtrack_optimizer/` |
 
 ---
 
 ## Installation
 
-```bash
-pip install KapoorLabs-MTrack
-```
+The package ships in two layers — pick the install that matches your
+use case:
+
+| Goal | Install command | What you get |
+|---|---|---|
+| Use the optimizer / pipeline from scripts and notebooks | `pip install KapoorLabs-MTrack` | core: models, fit, simulate, pipeline, track, io |
+| Add the **napari plugin** for interactive fitting + tracking | `pip install KapoorLabs-MTrack[napari]` | core + napari + magicgui + Qt |
+| Everything, including dev / test deps | `pip install KapoorLabs-MTrack[all]` | core + napari + pytest + pytest-qt |
 
 Or for the development version:
 
 ```bash
-pip install git+https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack.git
+pip install -e .            # core only
+pip install -e .[napari]    # core + plugin
 ```
+
+### Launching the napari plugin
+
+```bash
+napari -w kapoorlabs-mtrack-optimizer "MTrack Optimizer"
+```
+
+(or open napari and pick **Plugins → MTrack Optimizer**). The widget
+has four tabs — see "Napari plugin (kapoorlabs-mtrack-optimizer)"
+below.
+
+---
+
+## Napari plugin (`kapoorlabs-mtrack-optimizer`)
+
+The plugin lives at `plugins/kapoorlabs_mtrack_optimizer/` and is
+exposed as a separate distribution entry-point so users can opt in via
+`pip install KapoorLabs-MTrack[napari]`. It wraps every step of the
+pipeline behind a tabbed magicgui UI:
+
+| Tab | What it does |
+|---|---|
+| **Input** | File pickers for the raw + label TIFFs (2-D or 2-D+T), microscope PSF (`sigma_x`, `sigma_y`), LM Jacobian mode. The **Load into napari** button drops both stacks into the viewer as `image` and `labels` layers and resets any prior fit overlays. |
+| **Fit** | `ds` seed, optional bbox padding, run / stop buttons. Pressing **Run fit (live)** spawns a `napari.qt.threading.thread_worker` driven by `kapoorlabs_mtrack_optimizer._worker.fit_stack_stream`, which yields one `FrameSnapshot` per frame. Each yield appends to two overlay layers — **MT tips** (`Points`) and **MT curves** (`Shapes`, with the walked-curve polyline) — both indexed on the time axis so the napari time slider scrubs them. A progress bar tracks the per-frame count. |
+| **Track** | Toggles for `intensity` / `curvature` / `ds` cost terms, weight spin boxes, gate distance, velocity lookback, max gap. **Run tracking** consumes the per-frame snapshots, runs `track_snapshots`, and adds a **MT tip tracks** layer (a napari `Tracks` layer with 2 rows per MT per frame — one per physical tip). |
+| **Results** | Per-MT summary (arc length t=0 → end, plus-was-tip), a microtubule picker, **Show kymograph for selected MT** (adds the kymograph as an inferno-colormapped image layer), and **Export CSVs** which writes `endpoints.csv` + `length_profiles.csv` via the existing `io` writers. |
+
+### Live overlays — what's actually rendered
+
+- **MT tips** layer: one cyan point per fitted tip per frame, sized
+  6 px, white-edged for visibility on bright frames.
+- **MT curves** layer: yellow polylines per fitted curve, walked at
+  the fitted `ds` so curvature/inflection are visible.
+- **MT tip tracks** layer (after tracking): napari's built-in Tracks
+  layer so you get connected colored trails per tip-track.
+- **kymograph mt N** layer (on demand): the inferno-colormapped
+  kymograph image generated by `build_kymograph(profile)`.
+
+### Architecture: why a generator and not a callback
+
+The core `pipeline.fit_stack.fit_stack` is intentionally a **batch**
+function — it returns the full snapshot list, with no GUI dependency.
+The plugin's `_worker.fit_stack_stream` replicates the same per-frame
+loop but **yields** after each frame, which `thread_worker(connect={
+"yielded": ...})` then dispatches to the main thread for layer
+updates. This keeps the core importable in headless environments
+(servers, CI, plain Python scripts) while letting the plugin scrub
+frames live.
 
 ## Contributing
 

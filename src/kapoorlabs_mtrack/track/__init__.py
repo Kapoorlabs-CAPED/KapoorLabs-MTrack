@@ -13,6 +13,7 @@ plus), and per-frame length profiles are emitted.
 
 from .cost import TrackingCost, mt_to_mt_cost
 from .hungarian import MTTrack, TipObservation, track_snapshots
+from .kymograph import Kymograph, build_kymograph
 from .profile import LengthProfile, build_length_profiles, label_plus_minus
 
 __all__ = [
@@ -24,4 +25,6 @@ __all__ = [
     "LengthProfile",
     "build_length_profiles",
     "label_plus_minus",
+    "Kymograph",
+    "build_kymograph",
 ]

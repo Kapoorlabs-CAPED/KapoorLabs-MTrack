@@ -1,0 +1,17 @@
+name: kapoorlabs-mtrack-optimizer
+display_name: KapoorLabs MTrack Optimizer
+contributions:
+  commands:
+    - id: kapoorlabs-mtrack-optimizer.widget
+      python_name: kapoorlabs_mtrack_optimizer._widget:plugin_wrapper_mtrack
+      title: MTrack Optimizer
+    - id: kapoorlabs-mtrack-optimizer.get_reader
+      python_name: kapoorlabs_mtrack_optimizer._reader:napari_get_reader
+      title: Open data with KapoorLabs MTrack Optimizer
+  readers:
+    - command: kapoorlabs-mtrack-optimizer.get_reader
+      accepts_directories: true
+      filename_patterns: ['*.tif', '*.tiff']
+  widgets:
+    - command: kapoorlabs-mtrack-optimizer.widget
+      display_name: MTrack Optimizer
