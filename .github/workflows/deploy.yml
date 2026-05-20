@@ -1,0 +1,62 @@
+# Build the wheel + sdist and publish to PyPI.
+#
+# Version comes from `git describe --tags`. setuptools_scm writes
+# src/kapoorlabs_mtrack/_version.py at build time, so the only thing
+# you have to do to ship a new release is:
+#
+#     git tag v1.2.3
+#     git push origin v1.2.3
+#
+# The tag push fires this workflow. The leading ``v`` is stripped, so
+# the uploaded wheel is named e.g. ``KapoorLabs_MTrack-1.2.3-py3-none-any.whl``.
+# ``workflow_dispatch`` is kept as a manual escape hatch (Actions tab →
+# Run workflow), but normal use is the tag push.
+#
+# Setup once per repo:
+#   Settings → Secrets and variables → Actions → New repository secret
+#     name : TWINE_API_KEY
+#     value: pypi-...   (token scoped to the KapoorLabs-MTrack project)
+
+name: mtrack_deploy
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Hello KapoorLabs Lab member"
+        default: "Ready to dispatch your code to PyPI"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools_scm needs full history + tags to resolve the version.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -U setuptools setuptools_scm wheel twine build
+
+      - name: Show resolved version
+        run: |
+          git describe --tags --always
+          python -c "from setuptools_scm import get_version; print('setuptools_scm resolved:', get_version())"
+
+      - name: Build sdist + wheel
+        run: python -m build .
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TWINE_API_KEY }}
+        run: twine upload --non-interactive dist/*
