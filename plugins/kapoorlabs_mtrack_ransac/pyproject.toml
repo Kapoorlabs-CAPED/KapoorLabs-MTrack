@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kapoorlabs-mtrack-ransac"
+version = "0.1.0"
+description = "Napari dock plugin for KapoorLabs-MTrack RANSAC kymograph fitting"
+readme = "README.md"
+license = { text = "BSD-3-Clause" }
+requires-python = ">=3.9"
+authors = [{ name = "Varun Kapoor", email = "randomaccessiblekapoor@gmail.com" }]
+keywords = ["napari", "kymograph", "ransac", "mtrack", "tracking"]
+classifiers = [
+    "Framework :: napari",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "kapoorlabs-mtrack>=1.0.0",
+    "napari>=0.4.18",
+    "magicgui>=0.7",
+    "qtpy",
+    "pyqt5",
+    "pandas",
+]
+
+# Optional: kymograph segmentation via the legacy keras VollSeg UNet.
+[project.optional-dependencies]
+vollseg = ["vollseg", "csbdeep"]
+
+[project.entry-points."napari.manifest"]
+"kapoorlabs-mtrack-ransac" = "kapoorlabs_mtrack_ransac:napari.yaml"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kapoorlabs_mtrack_ransac*"]
+
+[tool.setuptools.package-data]
+"kapoorlabs_mtrack_ransac" = ["*.yaml"]

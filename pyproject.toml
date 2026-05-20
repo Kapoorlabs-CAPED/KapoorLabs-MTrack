@@ -1,12 +1,85 @@
 [build-system]
-requires = ["setuptools>=42.0.0", "wheel", "setuptools_scm"]
+requires = ["setuptools>=64", "wheel", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "KapoorLabs-MTrack"
+dynamic = ["version"]
+description = "MTrack rewrite in python, deprecating the Fiji plugin"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Varun Kapoor", email = "randomaccessiblekapoor@gmail.com" }]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+# Core install — LM optimizer, simulator, pipeline, tracker. Heavyweight
+# scientific deps are vendored here because every public entry point
+# (fit_endpoints, fit_stack, track_snapshots) needs them.
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "tifffile",
+    "matplotlib",
+]
+
+[project.urls]
+"Bug Tracker"   = "https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack/issues"
+"Documentation" = "https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack#README.md"
+"Source Code"   = "https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack"
+"User Support"  = "https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack/issues"
+
+[project.optional-dependencies]
+# `pip install kapoorlabs-mtrack[napari]` — adds the two napari dock plugins.
+# Each plugin is a separate PyPI distribution living under ``plugins/``
+# with its own pyproject.toml. In a local checkout, do
+# ``pip install -e plugins/kapoorlabs_mtrack_optimizer`` /
+# ``pip install -e plugins/kapoorlabs_mtrack_ransac`` instead — the PyPI
+# names only resolve after the plugin packages are published.
+napari = [
+    "kapoorlabs-mtrack-optimizer>=0.1.0",
+    "kapoorlabs-mtrack-ransac>=0.1.0",
+]
+# Optional: pretrained vollseg UNET segmentation for kymographs in the
+# ransac plugin. Heavy dep (TensorFlow / csbdeep) — not in the default.
+vollseg = ["vollseg", "csbdeep"]
+# Everything: core + both plugins + vollseg + dev tools.
+all = [
+    "kapoorlabs-mtrack-optimizer>=0.1.0",
+    "kapoorlabs-mtrack-ransac>=0.1.0",
+    "vollseg",
+    "csbdeep",
+    "pytest",
+    "pytest-qt",
+]
+testing = ["tox", "pytest", "pytest-cov"]
+
+[project.entry-points."caped.manifest"]
+"KapoorLabs-MTrack" = "kapoorlabs_mtrack:caped.yaml"
+
+# Package layout — single root under ``src/``. Each napari plugin lives
+# in its own subproject under ``plugins/`` and ships separately.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml"]
 
 # Version comes from `git describe --tags` at build time. setuptools_scm
-# writes _version.py so setup.cfg / runtime imports both resolve to it.
-# Tag the commit (e.g. ``git tag v1.2.3 && git push --follow-tags``) and
-# the deploy workflow uploads that version to PyPI.
+# writes _version.py so runtime imports resolve to it. Tag the commit
+# (e.g. ``git tag v1.2.3 && git push --follow-tags``) and the deploy
+# workflow uploads that version to PyPI.
 [tool.setuptools_scm]
 write_to = "src/kapoorlabs_mtrack/_version.py"
 fallback_version = "0.0.0"

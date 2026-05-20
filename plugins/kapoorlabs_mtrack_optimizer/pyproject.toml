@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kapoorlabs-mtrack-optimizer"
+version = "0.1.0"
+description = "Napari dock plugin for the KapoorLabs-MTrack LM optimizer"
+readme = "README.md"
+license = { text = "BSD-3-Clause" }
+requires-python = ">=3.9"
+authors = [{ name = "Varun Kapoor", email = "randomaccessiblekapoor@gmail.com" }]
+keywords = ["napari", "tracking", "kymograph", "mtrack", "optimization"]
+classifiers = [
+    "Framework :: napari",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "kapoorlabs-mtrack>=1.0.0",
+    "napari>=0.4.18",
+    "magicgui>=0.7",
+    "qtpy",
+    "pyqt5",
+    "pandas",
+]
+
+[project.entry-points."napari.manifest"]
+"kapoorlabs-mtrack-optimizer" = "kapoorlabs_mtrack_optimizer:napari.yaml"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kapoorlabs_mtrack_optimizer*"]
+
+[tool.setuptools.package-data]
+"kapoorlabs_mtrack_optimizer" = ["*.yaml"]
