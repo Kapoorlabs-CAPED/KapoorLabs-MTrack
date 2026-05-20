@@ -3,7 +3,6 @@
 [![License BSD-3](https://img.shields.io/pypi/l/KapoorLabs-MTrack.svg?color=green)](https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack/raw/main/LICENSE)
 [![PyPI](https://img.shields.io/pypi/v/KapoorLabs-MTrack.svg?color=green)](https://pypi.org/project/KapoorLabs-MTrack)
 [![Python Version](https://img.shields.io/pypi/pyversions/KapoorLabs-MTrack.svg?color=green)](https://python.org)
-[![tests](https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack/workflows/tests/badge.svg)](https://github.com/Kapoorlabs-CAPED/KapoorLabs-MTrack/actions)
 [![codecov](https://codecov.io/gh/Kapoorlabs-CAPED/KapoorLabs-MTrack/branch/main/graph/badge.svg)](https://codecov.io/gh/Kapoorlabs-CAPED/KapoorLabs-MTrack)
 
 Python port of MTrack — model-based sub-pixel localisation of microtubule
